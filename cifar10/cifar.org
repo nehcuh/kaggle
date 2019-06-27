@@ -1,0 +1,314 @@
+#+TITLE: CIFAR 10 分类问题
+
+* 1. 数据描述
+
+#+BEGIN_QUOTE
+The CIFAR-10 data consists of 60,000 32x32 color images in 10 classes, with 6000 images per class. There are 50,000 training images and 10,000 test images in the official data. We have preserved the train/test split from the original dataset.  The provided files are:
+
+train.7z - a folder containing the training images in png format
+test.7z - a folder containing the test images in png format
+trainLabels.csv - the training labels
+
+To discourage certain forms of cheating (such as hand labeling) we have added 290,000 junk images in the test set. These images are ignored in the scoring. We have also made trivial modifications to the official 10,000 test images to prevent looking them up by file hash. These modifications should not appreciably affect the scoring. You should predict labels for all 300,000 images.
+
+The label classes in the dataset are:
+
+- airplane
+- automobile
+- bird
+- cat
+- deer
+- dog
+- frog
+- horse
+- ship
+- truck
+The classes are completely mutually exclusive. There is no overlap between automobiles and trucks. "Automobile" includes sedans, SUVs, things of that sort. "Truck" includes only big trucks. Neither includes pickup trucks.
+#+END_QUOTE
+
+1. CIFAR-10 数据由 60,000 32x32 彩色图片构成，图片一共分类 10 类，每类分别 6000 张图片
+2. 官方数据有 50,000 张图片作为训练数据， 10,000 张图片作为测试数据，数据结构如下：
+   - ~train.7z~: 包含训练图片，图片格式为 png
+   - ~test.7z~: 包含测试图片，图片格式为 png
+   - ~trainLabels~: 训练数据标注信息
+3. 在测试集中加入了 290,000 无用图片，在评分时，这些图片会被忽略。
+4. 官方的 10,000 张测试图片做了一些平凡的变换，避免通过哈希值直接找出这些图片
+5. 数据集中的标注类别为：
+   - airplane
+   - automobile
+   - bird
+   - cat
+   - deer
+   - dog
+   - frog
+   - horse
+   - ship
+   - truck
+6. 标注类别没有交集
+
+* 2. 数据处理
+
+** 2.1 解压缩与归档
+
+1. 解压缩
+
+   #+BEGIN_SRC python
+import os
+
+# 假设数据集在当前文件夹下的 data 文件夹
+data_dir = "./data"
+
+# 将相应的压缩文件解压到对应的文件夹中
+try:
+    files = os.listdir(data_dir)
+except FileNotFoundError:
+    raise FileNotFoundError(f"数据文件夹不存在，检查数据文件夹 {data_dir}")
+
+for fname in files:
+    if fname.endswith(".7z") and not os.path.exists(fname.split(".")[0]):
+        os.system(f"7z x fname")
+   #+END_SRC
+
+2. 归档
+
+   - 利用 ~trainLabels.csv~ 找出所有照片索引与标准对应信息
+   - 将原始训练集划分为训练集和验证集
+   - 将不同类别的图片分别存入不同的类别文件夹中
+
+       #+BEGIN_SRC python
+  # 读取类别与索引信息
+  # 1. 原始方法
+  def read_label_file(data_dir, label_file, train_dir, valid_ratio):
+      """
+      1. 读取原始标注信息
+      2. 将原始训练集划分为训练集和验证集
+      3. 计算划分原始数据集为训练集和验证集相应的类别下的条目个数
+      4. 返回重新划分后的每个类别对应训练数据数目和(索引, 类别)字典
+      """
+      with open(os.path.join(data_dir, label_file)) as f:
+          lines = f.readlines()[1:]
+          tokens = [l.rstrip().split(",") for l in lines]
+          idx_label = dict(((int(idx), label for idx, label in tokens)))
+      labels = set(idx_label.values())
+      n_train_valid = len(os.listdir(os.path.join(data_dir, train_dir)))
+      n_train = int(n_train_valid * (1-valid_ratio))
+      assert 0 < len(n_train) < len(n_train_valid)
+      return n_train // len(labels), idx_label
+
+# 2. 利用 pandas 快速处理
+import pandas as pd
+
+def read_label_file_with_pandas(data_dir, label_file, train_dir, valid_ratio):
+    """
+    1. 读取原始标注信息
+    2. 获取索引标注字典
+    3. 计算划分原始数据集为训练集和验证集相应的类别下的条目个数
+    4. 返回重新划分后的训练集每个类别相应训练数据数目和(索引, 标注) 字典
+    """
+    df = pd.read_csv(os.path.join(data_dir, label_file), index_col=["id"])
+    idx_label = df.to_dict()["label"]
+    n_train_valid = len(os.listdir(os.path.join(data_dir, train_dir)))
+    n_train = int(n_train_valid * (1-valid_ratio))
+    assert 0 < len(n_train) < len(n_train_valid)
+    return n_train // len(labels), idx_label
+
+
+def mkdir_if_not_exist(path):
+    """
+    如果 path 不存在则新建 path 文件夹
+    """
+    if not os.path.exists(os.path.join(*path)):
+        os.makedirs(os.path.join(*path))
+
+
+import shutil
+def reorg_train_valid(data_dir, train_dir, input_dir, n_train_per_label, idx_label):
+    """
+    1. 划分原始数据集为训练集和验证集
+    2. 按照类别将图片进行归档
+    """
+    label_count = {}
+    for train_file in os.listdir(os.path.join(data_dir, train_dir)):
+        idx = int(train_file.split(".")[0])
+        label = idx_label[idx]
+        mkdir_if_not_exist([data_dir, input_dir, "train_valid", label])
+        shutil.copy(os.path.join(data_dir, train_dir, train_file),
+                    os.path.join(data_dir, input_dir, "train_valid", label))
+        if label not in label_count or label_count[label] < n_train_per_label:
+            mkdir_if_not_exist([data_dir, input_dir, "train", label])
+            shutil.copy(os.path.join(data_dir, train_dir, train_file),
+                        os.path.join(data_dir, input_dir, "train", label))
+            label_count[label] = label_count.get(label, 0) + 1
+        else:
+            mkdir_of_not_exist([data_dir, input_dir, "valid", label])
+            shutil.copy(os.path.join(data_dir, train_dir, train_file),
+                        os.path.join(data_dir, input_dir, "valid", label))
+       #+END_SRC
+
+3. 整理测试集
+
+   #+BEGIN_SRC python
+def reorg_test(data_dir, test_dir, input_dir):
+    """
+    整理测试集，方便预测时读取
+    """
+    mkdir_if_not_exist([data_dir, input_dir, "test", "unknown"])
+    for test_file in os.listdir(os.path.join(data_dir, test_dir)):
+        shutil.copy(os.path.join(data_dir, test_dir, test_file),
+                    os.path.join(data_dir, input_dir, "test", "unknown"))
+   #+END_SRC
+
+4. 函数测试
+
+   #+BEGIN_SRC python
+train_dir, test_dir, batch_size = "train", "test", 128
+data_dir, label_file = "./data", "trainLabels.csv"
+input_dir, valid_ratio = "train_valid_test", 0.1
+reorg_cifar10_data(data_dir, label_file, train_dir, test_dir, input_dir, valid_ratio)
+   #+END_SRC
+
+** 2.2 图像增广
+
+1. 对训练图像做随机裁剪和翻转
+
+   #+BEGIN_SRC python
+from mxnet.gluon import data as gdata
+
+transform_train = gdata.vision.transforms.Compose([
+    gdata.vision.transforms.Resize(40),
+    gdata.vision.RandomResizedCrop(32, scale=(0.64, 1.0), ratio=(1.0, 1.0))
+    gdata.vision.RandomFlipLeftRight(),
+    gdata.vision.transforms.ToTensor(),
+    gdata.vision.transforms.Normalize([0.4914, 0.4822, 0.4465],
+                                      [0.2023, 0.1994, 0.2010]))
+])
+   #+END_SRC
+
+2. 对测试集仅做标准化处理
+
+   #+BEGIN_SRC python
+transform_test = gdata.vision.transforms.Compose([
+    gdata.vision.transforms.ToTensor(),
+    gdata.vision.transforms.Normalize([0.4914, 0.4822, 0.4465],
+                                      [0.2023, 0.1994, 0.2010])
+])
+   #+END_SRC
+
+* 3. 定义模型
+
+** 1. 构建残差模块
+
+#+BEGIN_SRC python
+from mxnet.gluon import nn
+
+class Residual(nn.HybridBlock):
+    def __init__(self, num_channels, use_1x1conv=False, strides=1, **kwargs):
+        super(Residual, self).__init__(**kwargs)
+        self.conv1 = nn.Conv2D(num_channels, kernel_size=3, padding=1, strides=strides)
+        self.conv2 = nn.Conv2D(num_channels, kernel_size=3, padding=1)
+        if use_1x1conv:
+            self.conv3 = nn.Conv2D(num_channels, kernel_size=1, strides=strides)
+        else:
+            self.conv3 = None
+        self.bn1 = nn.BatchNorm()
+        self.bn2 = nn.BatchNorm()
+       
+    def hybrid_forward(self, F, X):
+        Y = F.relu(self.bn1(self.conv1(X)))
+        Y = self.bn2(self.conv2(Y))
+        if self.conv3:
+            X = self.conv3(X)
+        return F.relu(Y + X)
+#+END_SRC
+
+** 2. 构架 ResNet-18 模型
+
+#+BEGIN_SRC python
+def resnet18(num_classes):
+    net = nn.HybridSequential()
+    net.add(nn.Conv2D(64, kernel_size=3, strides=1, padding=1),
+            nn.BatchNorm(), nn.Activation("relu"))
+
+def resnet_block(num_channels, num_residuals, first_block=False):
+    blk = nn.HybridSequential()
+    for i in range(num_sequentials):
+        if i == 0 and not first_block:
+            blk.add(Residual(num_channels, use_1x1conv=True, strides=2))
+        else:
+            blk.add(Residual(num_channels))
+    return blk
+
+net.add(resnet_block(64, 2, first_block=True),
+        resnet_block(128, 2),
+        resnet_block(256, 2),
+        resnet_block(512, 2))
+net.add(nn.GlobalAvgPool2D(), nn.Dense(num_classes))
+return net
+#+END_SRC
+
+** 3. 模型使用 Xavier 随机初始化
+
+#+BEGIN_SRC python
+def get_net(ctx):
+    num_classes = 10
+    net = resnet18(num_classes)
+    net.initialize(ctx=ctx, init=init.Xavier())
+    return net
+
+loss = gloss.SoftmaxCrossEntropy()
+#+END_SRC
+
+* 4. 定义训练函数
+** 1. 训练函数
+
+#+BEGIN_SRC python
+def train(net, train_iter, valid_iter, num_epochs, lr, wd, ctx, lr_period, lr_decay):
+    trainer = gluon.Trainer(net.collect_params(), "sgd", {"learning_rate": lr, "momentum": 0.9, "wd": wd})
+    for epoch in range(num_epochs):
+        train_l_sum, train_acc_sum, n, start = 0., 0., 0, time.time()
+        if epoch > 0 and epoch % lr_period == 0:
+            trainer.set_learning_rate(trainer.learning_rate * lr_decay)
+        for X, y in train_iter:
+            y = y.astype("float32").as_in_context(ctx)
+            l = loss(y_hat, y).sum()
+        l.backward()
+        trainer.step(batch_size)
+        train_l_sum += l.asscalar()
+        train_acc_sum += (y_hat.argmax(axis=1) == y).sum().asscalar()
+        n += y.size
+    time_s = f"time {time.time() - start:.2f}"
+    if valid_iter is not None:
+        valid_acc = d2l.evaluate_accuracy(valid_iter, net, ctx)
+        epoch_s = f"epoch {epoch+1}, loss {train_l_sum/n:.4f}, train acc {train_acc_sum/n:.4f}, valid acc {valid_acc:.4f}"
+    else:
+        epoch_s = f"epoch {epoch+1}, loss {train_l_sum/n:.4f}, train acc {train_acc_sum/n:.4f}"
+    print(epoch_s + time_s + ', lr ' + str(trainer.learning_rate))
+#+END_SRC
+
+** 2. 训练并验证模型
+
+#+BEGIN_SRC python
+ctx, num_epochs, lr, wd = d2l.try_gpu(), 1, 0.1, 5e-4
+lr_period, lr_decay, net = 80, 0.1, get_net(ctx)
+net.hybridize()
+train(net, train_iter, valid_iter, num_epochs, lr, wd, ctx, lr_period,
+      lr_decay)
+#+END_SRC
+
+** 3. 对测试集分类并在 Kaggle 提交结果
+
+#+BEGIN_SRC python
+net, preds = get_net(ctx), []
+net.hybridize()
+train(net, train_valid_iter, None, num_epochs, lr, wd, ctx, lr_period,
+      lr_decay)
+
+for X, _ in test_iter:
+    y_hat = net(X.as_in_context(ctx))
+    preds.extend(y_hat.argmax(axis=1).astype(int).asnumpy())
+sorted_ids = list(range(1, len(test_ds) + 1))
+sorted_ids.sort(key=lambda x: str(x))
+df = pd.DataFrame({'id': sorted_ids, 'label': preds})
+df['label'] = df['label'].apply(lambda x: train_valid_ds.synsets[x])
+df.to_csv('submission.csv', index=False)
+#+END_SRC
